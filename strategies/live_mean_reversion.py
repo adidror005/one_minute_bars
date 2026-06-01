@@ -63,6 +63,7 @@ class LiveMeanReversion:
             double_down_cfg=double_down_cfg,
         )
         self.entry_price_limits = strategy_cfg.get("entry_price_limits", {})
+        self.latest_trade_price_rules = strategy_cfg.get("latest_trade_price_rules", {})
 
         self.max_new_trades_per_day = strategy_cfg.get("max_new_trades_per_day", 6)
         self.max_open_trades_total = strategy_cfg.get("max_open_trades_total", 200)
@@ -138,6 +139,9 @@ class LiveMeanReversion:
 
         self.last_sell_price = None
         self.last_sell_date = None
+        self.last_sell_time = None
+        self.last_sell_underlying_price = None
+        self.last_sell_execution_price = None
         self.last_signal = None
 
         self.open_trades_store = OpenTradesStore(
@@ -363,6 +367,14 @@ class LiveMeanReversion:
             )
             reasons.extend(price_limit_reasons)
 
+        latest_trade_debug = []
+        if not reasons:
+            latest_trade_reasons, latest_trade_debug = self.check_latest_trade_price_rules(
+                entry_type=entry_type,
+                features=features,
+            )
+            reasons.extend(latest_trade_reasons)
+
         # ====================================================
         # Reentry cooldown after sells
         # Existing logic kept.
@@ -390,6 +402,7 @@ class LiveMeanReversion:
                     )
                     price_rule_text = self.format_double_down_debug(double_down_debug)
                     price_limit_text = self.format_entry_price_limit_debug(price_limit_debug)
+                    latest_trade_text = self.format_latest_trade_price_debug(latest_trade_debug)
 
                     self.log(
                         f"[NO ENTRY] {features['time']} "
@@ -397,6 +410,7 @@ class LiveMeanReversion:
                         f"close={close:.2f} "
                         f"entry_conditions={entry_condition_text} "
                         f"price_limits={price_limit_text} "
+                        f"latest_trade={latest_trade_text} "
                         f"price_rules={price_rule_text} "
                         f"rsi={rsi_text} "
                         f"ml_prob={ml_text} "
@@ -409,6 +423,7 @@ class LiveMeanReversion:
                         f"close={close:.2f} "
                         f"entry_conditions={self.entry_condition_evaluator.format_debug(entry_condition_debug)} "
                         f"price_limits={self.format_entry_price_limit_debug(price_limit_debug)} "
+                        f"latest_trade={self.format_latest_trade_price_debug(latest_trade_debug)} "
                         f"rsi={rsi_text} "
                         f"ml_prob={ml_text} "
                         f"reasons={reasons}"
@@ -513,6 +528,172 @@ class LiveMeanReversion:
             parts.append(
                 f"{item['limit']} {item['basis']}={price_text} "
                 f"limit={item['limit_value']} passed={item['passed']}"
+            )
+
+        return "[" + "; ".join(parts) + "]"
+
+    def check_latest_trade_price_rules(self, entry_type, features):
+        cfg = self.latest_trade_price_rules
+        if not cfg or not cfg.get("enabled", False):
+            return [], []
+
+        rules = cfg.get(entry_type, [])
+        if not rules:
+            return [], []
+
+        previous_event = self.latest_trade_price_rule_previous_event(entry_type)
+        if previous_event is None:
+            return [], []
+
+        reasons = []
+        debug = []
+
+        for rule in rules:
+            basis = rule.get("basis", "underlying")
+            mode = rule.get("mode", "pct")
+            current_price = self.current_latest_trade_rule_price(basis, features)
+            previous_price = self.previous_latest_trade_rule_price(basis, previous_event)
+            max_change = self.rule_max_change(rule)
+
+            if current_price is None or previous_price is None:
+                reasons.append(f"latest_trade_{basis}_price_missing")
+                debug.append({
+                    "basis": basis,
+                    "mode": mode,
+                    "previous_event": previous_event["kind"],
+                    "current": current_price,
+                    "previous": previous_price,
+                    "change": None,
+                    "max_change": max_change,
+                    "passed": False,
+                })
+                continue
+
+            change = current_price - previous_price
+
+            if mode == "pct":
+                if previous_price == 0:
+                    reasons.append(f"latest_trade_{basis}_previous_price_zero")
+                    passed = False
+                    change_value = None
+                else:
+                    change_value = change / previous_price
+                    passed = change_value <= max_change
+            elif mode == "abs":
+                change_value = change
+                passed = change_value <= max_change
+            else:
+                reasons.append(f"latest_trade_{basis}_unsupported_mode")
+                passed = False
+                change_value = None
+
+            debug.append({
+                "basis": basis,
+                "mode": mode,
+                "previous_event": previous_event["kind"],
+                "current": current_price,
+                "previous": previous_price,
+                "change": change_value,
+                "max_change": max_change,
+                "passed": passed,
+            })
+
+            if not passed:
+                reasons.append(f"latest_trade_{basis}_{mode}_change_not_low_enough")
+
+        return reasons, debug
+
+    def latest_trade_price_rule_previous_event(self, entry_type):
+        if entry_type == "double_down":
+            return self.latest_buy_event()
+
+        return self.latest_buy_or_sell_event()
+
+    def latest_buy_or_sell_event(self):
+        latest_buy = self.latest_buy_event()
+        latest_sell = self.latest_sell_event()
+
+        if latest_buy is None:
+            return latest_sell
+
+        if latest_sell is None:
+            return latest_buy
+
+        if pd.to_datetime(latest_sell["time"]) > pd.to_datetime(latest_buy["time"]):
+            return latest_sell
+
+        return latest_buy
+
+    def latest_buy_event(self):
+        if not self.open_trades:
+            return None
+
+        latest_trade = max(
+            self.open_trades,
+            key=lambda trade: pd.to_datetime(trade.get("entry_time")),
+        )
+
+        return {
+            "kind": "buy",
+            "time": latest_trade.get("entry_time"),
+            "underlying_price": latest_trade.get(
+                "entry_underlying_price",
+                latest_trade.get("entry_price"),
+            ),
+            "execution_price": latest_trade.get("entry_price"),
+        }
+
+    def latest_sell_event(self):
+        if self.last_sell_time is None:
+            return None
+
+        return {
+            "kind": "sell",
+            "time": self.last_sell_time,
+            "underlying_price": self.last_sell_underlying_price,
+            "execution_price": self.last_sell_execution_price,
+        }
+
+    def current_latest_trade_rule_price(self, basis, features):
+        if basis in ("underlying", "stock"):
+            return features["close"]
+
+        if basis in ("execution", "instrument", "option", "bag"):
+            return self.estimate_entry_buy_price(features)
+
+        return None
+
+    def previous_latest_trade_rule_price(self, basis, previous_event):
+        if basis in ("underlying", "stock"):
+            return previous_event.get("underlying_price")
+
+        if basis in ("execution", "instrument", "option", "bag"):
+            return previous_event.get("execution_price")
+
+        return None
+
+    def format_latest_trade_price_debug(self, debug):
+        if not debug:
+            return "[]"
+
+        parts = []
+        for item in debug:
+            change = item["change"]
+            if change is None:
+                change_text = "None"
+            elif item["mode"] == "pct":
+                change_text = f"{change:.2%}"
+            else:
+                change_text = f"{change:.2f}"
+
+            parts.append(
+                f"{item['basis']}:{item['mode']} "
+                f"prev_event={item['previous_event']} "
+                f"prev={item['previous']} "
+                f"cur={item['current']} "
+                f"change={change_text} "
+                f"max={item['max_change']} "
+                f"passed={item['passed']}"
             )
 
         return "[" + "; ".join(parts) + "]"
@@ -727,7 +908,7 @@ class LiveMeanReversion:
             take_profit = entry_underlying * (1 + self.min_take_profit)
 
             if close >= take_profit:
-                self.close_trade(t, close, today)
+                self.close_trade(t, features)
             else:
                 still_open.append(t)
 
@@ -736,7 +917,10 @@ class LiveMeanReversion:
         if self.autosave_open_trades:
             self.open_trades_store.save(self.open_trades)
 
-    def close_trade(self, trade_info, close_price, today):
+    def close_trade(self, trade_info, features):
+        close_price = features["close"]
+        today = features["date"]
+
         if self.execution_instrument is not None:
             trade_contract = self.execution_instrument.resolve_contract()
             exit_limit = self.execution_instrument.estimate_exit_limit_price(close_price)
@@ -757,6 +941,9 @@ class LiveMeanReversion:
 
         self.last_sell_price = close_price
         self.last_sell_date = today
+        self.last_sell_time = features["time"]
+        self.last_sell_underlying_price = close_price
+        self.last_sell_execution_price = exit_limit
 
         if self.DEBUG_ORDERS:
             self.log(

@@ -128,7 +128,7 @@ DEFAULT_LIVE_CONFIG = {
 
         # Selectable entry strategy. This only decides whether to enter.
         # Signal data still comes from the underlying stock, and execution can
-        # still route to stock/options/bags through execution.instrument.
+        # still route to stock/options through execution.instrument.
         #
         # median_mad: old behavior, using median/MAD z-score in bb_score.
         # standard_bb: rolling mean/std Bollinger z-score, not median-based.
@@ -147,7 +147,7 @@ DEFAULT_LIVE_CONFIG = {
         # max_stock_price / min_stock_price use the underlying signal close.
         # max_buy_price / min_buy_price use the estimated execution buy limit.
         # For stock execution, buy price is effectively the stock limit price.
-        # For options/bags, buy price is the option/combo estimated limit.
+        # For options, buy price is the estimated option limit.
         "entry_price_limits": {
             "first_entry": {
                 "max_stock_price": None,
@@ -161,6 +161,26 @@ DEFAULT_LIVE_CONFIG = {
                 "max_buy_price": None,
                 "min_buy_price": None,
             },
+        },
+
+        # Optional buy-the-dip guard against the latest executed event.
+        # First entries compare against whichever happened later: the last buy
+        # or the last sell. Double-down entries compare against the last buy.
+        #
+        # basis=underlying compares the underlying stock close.
+        # basis=execution compares the actual stock/option buy price.
+        # mode=pct compares (current - previous) / previous.
+        # mode=abs compares current - previous in dollars.
+        "latest_trade_price_rules": {
+            "enabled": False,
+            "first_entry": [
+                # {"basis": "underlying", "mode": "pct", "max_change": -0.01},
+                # {"basis": "execution", "mode": "pct", "max_change": -0.20},
+            ],
+            "double_down": [
+                # {"basis": "underlying", "mode": "pct", "max_change": -0.01},
+                # {"basis": "execution", "mode": "pct", "max_change": -0.20},
+            ],
         },
 
         # Optional raw feature-based overrides.
@@ -191,7 +211,7 @@ DEFAULT_LIVE_CONFIG = {
         # Backward-compatible default. Used if price_rules is not set.
         "discount_pct": 0.01,
         # basis: underlying/stock uses signal stock price.
-        # basis: execution/instrument/option/bag uses traded instrument price.
+        # basis: execution/instrument/option uses traded instrument price.
         # mode: pct compares (current - previous) / previous.
         # mode: abs compares current - previous in dollars.
         # max_change should usually be negative for averaging down.
@@ -221,9 +241,17 @@ DEFAULT_LIVE_CONFIG = {
     "execution": {
         "tif": "DAY",
         "outside_rth": True,
-        # Signal bars come from underlying stock. Orders can target stock/option/combo.
+        # Market-data defaults for notebooks/helpers. The strategy itself
+        # consumes whatever real_time_bars object you attach to it.
+        "market_data": {
+            "exchange": "SMART",
+            "barSize": 5,
+            "whatToShow": "TRADES",
+            "useRTH": False,
+        },
+        # Signal bars come from underlying stock. Orders can target stock or a single option.
         "instrument": {
-            "type": "stock",  # stock | option | combo
+            "type": "stock",  # stock | option
             "exchange": "SMART",
             "currency": "USD",
             # Option example:
@@ -231,12 +259,6 @@ DEFAULT_LIVE_CONFIG = {
             # "expiry": "20260605",
             # "strike": 540,
             # "right": "C",
-            # Combo example:
-            # "type": "combo",
-            # "legs": [
-            #     {"expiry": "20260605", "strike": 540, "right": "C", "ratio": 1, "side": "BUY"},
-            #     {"expiry": "20260605", "strike": 545, "right": "C", "ratio": 1, "side": "SELL"},
-            # ],
             "limit_entry_offset_pct": 0.02,
             "limit_exit_offset_pct": 0.02,
         },

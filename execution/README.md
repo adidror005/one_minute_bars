@@ -1,6 +1,6 @@
 # Execution Instrument
 
-Use underlying bars for **signals**, and route orders to **stock**, **option**, or **combo (bag)**.
+Use underlying bars for **signals**, and route orders to **stock** or a single **option**.
 
 ## Wiring
 
@@ -41,20 +41,8 @@ algo = LiveMeanReversion(
 # real_time_bars.updateEvent += algo.on_bar
 ```
 
-## Combo (bag) example
-
-```python
-config.raw["execution"]["instrument"] = {
-    "type": "combo",
-    "legs": [
-        {"expiry": "20260605", "strike": 540, "right": "C", "ratio": 1, "side": "BUY"},
-        {"expiry": "20260605", "strike": 545, "right": "C", "ratio": 1, "side": "SELL"},
-    ],
-}
-```
-
 ## Behavior
 
 - Entry/exit **decisions** use underlying features (`close`, BB score, RSI, etc.).
-- Entry/exit **orders** use the configured instrument contract and estimated option/combo limit prices.
+- Entry/exit **orders** use the configured stock or option contract and estimated option limit prices.
 - Take-profit checks compare underlying close vs `entry_underlying_price`.

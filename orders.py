@@ -5,7 +5,7 @@
 # ============================================================
 from dataclasses import dataclass
 from enum import Enum
-from ib_async import Bag, Option, Stock
+from ib_async import Option, Stock
 from typing import Any, Union
 
 
@@ -13,7 +13,7 @@ class OrderSide(str, Enum):
     BUY = "BUY"
     SELL = "SELL"
 
-TradeContract = Union[Stock, Option, Bag]
+TradeContract = Union[Stock, Option]
 
 
 @dataclass

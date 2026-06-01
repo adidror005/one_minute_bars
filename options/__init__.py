@@ -1,7 +1,6 @@
 """Option pricing engine abstractions and implementations."""
 
 from .engine import (
-    ComboLegSpec,
     EngineQuote,
     OptionContractSpec,
     OptionPricingEngine,
@@ -11,7 +10,6 @@ from .engine import (
 from .ib_async_engine import IbAsyncOptionPricingEngine
 
 __all__ = [
-    "ComboLegSpec",
     "EngineQuote",
     "IbAsyncOptionPricingEngine",
     "OptionContractSpec",
@@ -19,4 +17,3 @@ __all__ = [
     "OptionQuote",
     "PredictedMove",
 ]
-

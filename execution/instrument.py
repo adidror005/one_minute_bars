@@ -1,26 +1,14 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Literal
 
-from ib_async import Bag, ComboLeg, Option, Stock
+from ib_async import Option, Stock
 
-from options import ComboLegSpec, IbAsyncOptionPricingEngine, OptionContractSpec
-
-
-InstrumentType = Literal["stock", "option", "combo"]
+from options import IbAsyncOptionPricingEngine, OptionContractSpec
 
 
-@dataclass
-class ComboLegConfig:
-    expiry: str
-    strike: float
-    right: str
-    ratio: int = 1
-    side: str = "BUY"
-    exchange: str = "SMART"
-    currency: str = "USD"
-    multiplier: float = 100.0
+InstrumentType = Literal["stock", "option"]
 
 
 @dataclass
@@ -34,8 +22,6 @@ class ExecutionInstrumentConfig:
     strike: float | None = None
     right: str | None = None
     multiplier: float = 100.0
-    # Combo fields
-    legs: list[ComboLegConfig] = field(default_factory=list)
     # Limit offsets applied to estimated execution-instrument price
     limit_entry_offset_pct: float = 0.02
     limit_exit_offset_pct: float = 0.02
@@ -60,7 +46,7 @@ class ExecutionInstrument:
 
 
 class IbkrExecutionInstrument(ExecutionInstrument):
-    """Routes orders to stock, option, or IB bag while signals stay on underlying."""
+    """Routes orders to stock or a single option while signals stay on underlying."""
 
     def __init__(
         self,
@@ -104,10 +90,6 @@ class IbkrExecutionInstrument(ExecutionInstrument):
             )
             return self._contract
 
-        if self.config.type == "combo":
-            self._contract = self._build_bag_contract()
-            return self._contract
-
         raise ValueError(f"Unsupported instrument type: {self.config.type}")
 
     def estimate_market_price(self) -> float:
@@ -138,10 +120,6 @@ class IbkrExecutionInstrument(ExecutionInstrument):
                 multiplier=self.config.multiplier,
             )
             return self.option_engine.estimate_option_price(spec).price
-
-        if self.config.type == "combo":
-            legs = self._combo_leg_specs()
-            return self.option_engine.estimate_combo_price(legs).price
 
         raise ValueError(f"Unsupported instrument type: {self.config.type}")
 
@@ -177,58 +155,6 @@ class IbkrExecutionInstrument(ExecutionInstrument):
         self.ib.qualifyContracts(option)
         return option
 
-    def _build_bag_contract(self) -> Bag:
-        if not self.config.legs:
-            raise ValueError("Combo instrument requires at least one leg.")
-
-        combo_legs: list[ComboLeg] = []
-        for leg_cfg in self.config.legs:
-            spec = OptionContractSpec(
-                symbol=self.config.symbol,
-                expiry=leg_cfg.expiry,
-                strike=float(leg_cfg.strike),
-                right=leg_cfg.right.upper(),
-                exchange=leg_cfg.exchange,
-                currency=leg_cfg.currency,
-                multiplier=leg_cfg.multiplier,
-            )
-            option = self._build_option_contract(spec)
-            combo_legs.append(
-                ComboLeg(
-                    conId=option.conId,
-                    ratio=int(leg_cfg.ratio),
-                    action=leg_cfg.side.upper(),
-                    exchange=leg_cfg.exchange,
-                )
-            )
-
-        bag = Bag(
-            symbol=self.config.symbol,
-            currency=self.config.currency,
-            exchange=self.config.exchange,
-        )
-        bag.comboLegs = combo_legs
-        self.ib.qualifyContracts(bag)
-        return bag
-
-    def _combo_leg_specs(self) -> list[ComboLegSpec]:
-        return [
-            ComboLegSpec(
-                contract=OptionContractSpec(
-                    symbol=self.config.symbol,
-                    expiry=leg.expiry,
-                    strike=float(leg.strike),
-                    right=leg.right.upper(),
-                    exchange=leg.exchange,
-                    currency=leg.currency,
-                    multiplier=leg.multiplier,
-                ),
-                ratio=int(leg.ratio),
-                side=leg.side.upper(),
-            )
-            for leg in self.config.legs
-        ]
-
 
 def build_execution_instrument(
     ib: object,
@@ -237,21 +163,15 @@ def build_execution_instrument(
     option_engine: IbAsyncOptionPricingEngine | None = None,
 ) -> IbkrExecutionInstrument:
     instrument_cfg = execution_cfg.get("instrument", {})
-    leg_cfgs = [
-        ComboLegConfig(
-            expiry=leg["expiry"],
-            strike=float(leg["strike"]),
-            right=leg.get("right", "C"),
-            ratio=int(leg.get("ratio", 1)),
-            side=leg.get("side", "BUY"),
-            exchange=leg.get("exchange", "SMART"),
-            currency=leg.get("currency", "USD"),
-            multiplier=float(leg.get("multiplier", 100.0)),
+    instrument_type = instrument_cfg.get("type", "stock")
+    if instrument_type not in ("stock", "option"):
+        raise ValueError(
+            f"Unsupported instrument type {instrument_type!r}. "
+            "Live execution currently supports 'stock' and single 'option' only."
         )
-        for leg in instrument_cfg.get("legs", [])
-    ]
+
     config = ExecutionInstrumentConfig(
-        type=instrument_cfg.get("type", "stock"),
+        type=instrument_type,
         symbol=symbol,
         exchange=instrument_cfg.get("exchange", "SMART"),
         currency=instrument_cfg.get("currency", "USD"),
@@ -259,7 +179,6 @@ def build_execution_instrument(
         strike=instrument_cfg.get("strike"),
         right=instrument_cfg.get("right"),
         multiplier=float(instrument_cfg.get("multiplier", 100.0)),
-        legs=leg_cfgs,
         limit_entry_offset_pct=float(
             instrument_cfg.get(
                 "limit_entry_offset_pct",

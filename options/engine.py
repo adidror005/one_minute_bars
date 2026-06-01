@@ -37,17 +37,6 @@ class OptionQuote:
 
 
 @dataclass(frozen=True)
-class ComboLegSpec:
-    contract: OptionContractSpec
-    ratio: int = 1
-    side: str = "BUY"  # "BUY" or "SELL"
-
-    @property
-    def signed_ratio(self) -> int:
-        return self.ratio if self.side.upper() == "BUY" else -self.ratio
-
-
-@dataclass(frozen=True)
 class EngineQuote:
     price: float
     source: str
@@ -152,27 +141,6 @@ class OptionPricingEngine(ABC):
             },
         )
 
-    def estimate_combo_price(self, legs: list[ComboLegSpec]) -> EngineQuote:
-        if not legs:
-            raise ValueError("Combo must include at least one leg.")
-
-        leg_quotes: list[tuple[ComboLegSpec, EngineQuote]] = []
-        total = 0.0
-        confidence_parts = []
-        for leg in legs:
-            q = self.estimate_option_price(leg.contract)
-            signed = leg.signed_ratio
-            total += q.price * signed
-            confidence_parts.append(q.confidence)
-            leg_quotes.append((leg, q))
-
-        return EngineQuote(
-            price=total,
-            source="sum_of_leg_estimates",
-            confidence=sum(confidence_parts) / len(confidence_parts),
-            details={"legs": leg_quotes},
-        )
-
     def predict_option_change_for_stock_move(
         self,
         contract: OptionContractSpec,
@@ -263,34 +231,6 @@ class OptionPricingEngine(ABC):
         # Blend base curve/provider with market-implied short-dated parity rate.
         blend_weight = 0.65 if t < (21.0 / 365.0) else 0.45
         return (blend_weight * implied) + ((1.0 - blend_weight) * base)
-
-    def predict_combo_change_for_stock_move(
-        self,
-        legs: list[ComboLegSpec],
-        stock_price_change: float,
-    ) -> PredictedMove:
-        if not legs:
-            raise ValueError("Combo must include at least one leg.")
-
-        total_change = 0.0
-        base_combo = self.estimate_combo_price(legs).price
-        confidences = []
-        parts = []
-        for leg in legs:
-            leg_move = self.predict_option_change_for_stock_move(leg.contract, stock_price_change)
-            signed = leg.signed_ratio
-            leg_change = leg_move.option_price_change * signed
-            total_change += leg_change
-            confidences.append(leg_move.confidence)
-            parts.append((leg, leg_move))
-
-        return PredictedMove(
-            option_price_change=total_change,
-            stock_price_change=stock_price_change,
-            estimated_new_option_price=max(0.0, base_combo + total_change),
-            confidence=sum(confidences) / len(confidences),
-            details={"legs": parts, "base_combo": base_combo},
-        )
 
     @abstractmethod
     def _direct_price(self, quote: OptionQuote) -> tuple[float | None, float]:
@@ -597,4 +537,3 @@ def _fit_local_smile(target_strike: float, points: list[tuple[float, float]]) ->
     c = det_c / det
     iv = a + (b * target_strike) + (c * target_strike * target_strike)
     return max(iv, 0.01)
-
