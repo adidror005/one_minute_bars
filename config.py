@@ -18,6 +18,21 @@ DEFAULT_LIVE_CONFIG = {
     "features": {
         "window": 20,
         "min_bars": 60,
+        # Feature windows are measured in completed signal bars. If timeframe
+        # is "5min", window=20 means 20 five-minute bars.
+        # Completed signal bars used by the strategy.
+        # Current implementation supports time and dollar bars using the same
+        # raw IB stream.
+        "bar": {
+            "type": "time",
+            "timeframe": "1min",
+            "history_window": 390,
+            # Examples:
+            # "timeframe": "5min",
+            # "type": "dollar",
+            # "dollar_threshold": 1_000_000,
+        },
+        # Backward-compatible fallback for older configs.
         "minute_window": 390,
     },
 
@@ -110,18 +125,82 @@ DEFAULT_LIVE_CONFIG = {
         "reentry_discount_pct": 0.01,
 
         "limit_entry_offset_pct": 0.0005,
+
+        # Selectable entry strategy. This only decides whether to enter.
+        # Signal data still comes from the underlying stock, and execution can
+        # still route to stock/options/bags through execution.instrument.
+        #
+        # median_mad: old behavior, using median/MAD z-score in bb_score.
+        # standard_bb: rolling mean/std Bollinger z-score, not median-based.
+        # always_true: no signal predicate; risk/price/double-down guards still apply.
+        "entry_strategy": {
+            "name": "median_mad",
+            # "name": "standard_bb",
+            # "name": "always_true",
+            # "z": 2.0,
+            # "double_down_mult": 3.0,
+        },
+
+        # Hard price gates for entries. These are safety limits, independent
+        # of the selected entry strategy.
+        #
+        # max_stock_price / min_stock_price use the underlying signal close.
+        # max_buy_price / min_buy_price use the estimated execution buy limit.
+        # For stock execution, buy price is effectively the stock limit price.
+        # For options/bags, buy price is the option/combo estimated limit.
+        "entry_price_limits": {
+            "first_entry": {
+                "max_stock_price": None,
+                "min_stock_price": None,
+                "max_buy_price": None,
+                "min_buy_price": None,
+            },
+            "double_down": {
+                "max_stock_price": None,
+                "min_stock_price": None,
+                "max_buy_price": None,
+                "min_buy_price": None,
+            },
+        },
+
+        # Optional raw feature-based overrides.
+        # If first_entry or double_down is set here, those rules override
+        # entry_strategy for that entry type.
+        #
+        # Any feature returned by LiveMedianMadFeatureCalculator can be used,
+        # for example standard_bb_z, rsi_14, dist_day_vwap, ret_5m.
+        # Supported ops: <, <=, >, >=, ==, !=.
+        # Every rule in the selected list must pass.
+        "entry_conditions": {
+            # "first_entry": [
+            #     {"field": "standard_bb_z", "op": "<=", "value": -2.0},
+            #     {"field": "rsi_14", "op": "<=", "value": 35.0},
+            # ],
+            # "double_down": [
+            #     {"field": "standard_bb_z", "op": "<=", "value": -6.0},
+            # ],
+        },
     },
 
     "double_down": {
-        # First entry:
-        #   bb_score <= -k
-        #
-        # Double down:
-        #   bb_score <= -(bb_mult * k)
-        #   and close <= previous_entry_price * (1 - discount_pct)
+        # Double down requires:
+        #   1. the configured double_down entry strategy/rules pass
+        #   2. every configured price rule passes
         "enabled": True,
         "bb_mult": 3,
+        # Backward-compatible default. Used if price_rules is not set.
         "discount_pct": 0.01,
+        # basis: underlying/stock uses signal stock price.
+        # basis: execution/instrument/option/bag uses traded instrument price.
+        # mode: pct compares (current - previous) / previous.
+        # mode: abs compares current - previous in dollars.
+        # max_change should usually be negative for averaging down.
+        "price_rules": [
+            {"basis": "underlying", "mode": "pct", "max_change": -0.01},
+            # {"basis": "underlying", "mode": "abs", "max_change": -5.00},
+            # {"basis": "execution", "mode": "pct", "max_change": -0.20},
+            # {"basis": "execution", "mode": "abs", "max_change": -0.50},
+        ],
     },
 
     "sizing": {

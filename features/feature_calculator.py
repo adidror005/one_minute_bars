@@ -3,6 +3,9 @@
 # Keeps feature engineering out of the trading class.
 # Feature names match the offline CatBoost feature_cols.
 # ============================================================
+import numpy as np
+import pandas as pd
+
 
 class LiveMedianMadFeatureCalculator:
     def __init__(self, window=20, min_bars=30):
@@ -20,6 +23,7 @@ class LiveMedianMadFeatureCalculator:
 
         df = self._add_base_time_columns(df)
         df = self._add_median_mad_features(df)
+        df = self._add_standard_bb_features(df)
         df = self._add_return_vol_features(df)
         df = self._add_bb_features(df)
         df = self._add_sma_trend_features(df)
@@ -36,10 +40,7 @@ class LiveMedianMadFeatureCalculator:
 
         row = df.iloc[-1]
 
-        if pd.isna(row["mad"]) or row["mad"] == 0:
-            return None
-
-        if pd.isna(row["bb_score"]):
+        if pd.isna(row["close"]):
             return None
 
         latest_time = row["time"]
@@ -100,6 +101,31 @@ class LiveMedianMadFeatureCalculator:
         )
 
         df["bb_score_prev"] = df.groupby("day")["bb_score"].shift(1)
+
+        return df
+
+    def _add_standard_bb_features(self, df):
+        df["standard_bb_mean"] = (
+            df.groupby("day")["close"]
+            .transform(lambda s: s.rolling(self.window).mean())
+        )
+
+        df["standard_bb_std"] = (
+            df.groupby("day")["close"]
+            .transform(lambda s: s.rolling(self.window).std())
+        )
+
+        df["standard_bb_z"] = (
+            (df["close"] - df["standard_bb_mean"])
+            / df["standard_bb_std"].replace(0, np.nan)
+        )
+
+        df["standard_bb_lower_2"] = df["standard_bb_mean"] - (2 * df["standard_bb_std"])
+        df["standard_bb_upper_2"] = df["standard_bb_mean"] + (2 * df["standard_bb_std"])
+        df["standard_bb_pct_b"] = (
+            (df["close"] - df["standard_bb_lower_2"])
+            / (df["standard_bb_upper_2"] - df["standard_bb_lower_2"]).replace(0, np.nan)
+        )
 
         return df
 
@@ -385,6 +411,12 @@ class LiveMedianMadFeatureCalculator:
             "median": row["median"],
             "mad": row["mad"],
             "bb_score": row["bb_score"],
+            "standard_bb_mean": row["standard_bb_mean"],
+            "standard_bb_std": row["standard_bb_std"],
+            "standard_bb_z": row["standard_bb_z"],
+            "standard_bb_lower_2": row["standard_bb_lower_2"],
+            "standard_bb_upper_2": row["standard_bb_upper_2"],
+            "standard_bb_pct_b": row["standard_bb_pct_b"],
             "rsi": row["rsi_14"],
             "session_minutes": session_minutes,
             "minutes_until_close": minutes_until_close,
