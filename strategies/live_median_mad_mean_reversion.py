@@ -3,22 +3,24 @@ from collections import deque
 from features.feature_calculator import LiveMedianMadFeatureCalculator
 from model_filters.always_pass_model_filter import AlwaysPassModelFilter
 from orders import LimitOrderSpec, OrderSide
-from strategies.open_trades_persistence_mixin import OpenTradesPersistenceMixin
+from strategies.open_trades_store import OpenTradesStore
 
 
-class LiveMedianMadMeanReversion(OpenTradesPersistenceMixin):
+class LiveMedianMadMeanReversion:
     def __init__(
         self,
         config,
         order_router,
         feature_calculator=None,
         model_filter=None,
+        execution_instrument=None,
     ):
         self.config = config
         self.raw_config = config.raw
 
         self.symbol = config.symbol
         self.order_router = order_router
+        self.execution_instrument = execution_instrument
 
         paths_cfg = config.paths
         features_cfg = config.features
@@ -130,7 +132,14 @@ class LiveMedianMadMeanReversion(OpenTradesPersistenceMixin):
         self.last_sell_date = None
         self.last_signal = None
 
-        self.load_open_trades()
+        self.open_trades_store = OpenTradesStore(
+            path=self.open_trades_path,
+            symbol=self.symbol,
+            debug_save=self.DEBUG_SAVE,
+            logger=self.log,
+        )
+
+        self.open_trades = self.open_trades_store.load()
 
     def log(self, *args):
         print(*args)
@@ -312,7 +321,7 @@ class LiveMedianMadMeanReversion(OpenTradesPersistenceMixin):
         return features
 
     # ========================================================
-    # Daily state
+    # Daily state 
     # ========================================================
 
     def update_daily_state(self, features):
@@ -472,6 +481,7 @@ class LiveMedianMadMeanReversion(OpenTradesPersistenceMixin):
             "side": "BUY",
             "qty": qty,
             "limit_price": round(limit_price, 2),
+            "underlying_reference_price": close,
             "features": features,
             "reason": entry_type,
             "ml_prob": features.get("ml_prob"),
@@ -500,11 +510,19 @@ class LiveMedianMadMeanReversion(OpenTradesPersistenceMixin):
     # ========================================================
 
     def place_order(self, signal):
+        underlying_ref = signal.get("underlying_reference_price", signal["features"]["close"])
+        if self.execution_instrument is not None:
+            trade_contract = self.execution_instrument.resolve_contract()
+            execution_limit = self.execution_instrument.estimate_entry_limit_price(underlying_ref)
+        else:
+            trade_contract = self.order_router.contract
+            execution_limit = signal["limit_price"]
+
         order_spec = LimitOrderSpec(
-            contract=self.order_router.contract,
+            contract=trade_contract,
             side=OrderSide.BUY,
             qty=signal["qty"],
-            limit_price=signal["limit_price"],
+            limit_price=execution_limit,
             tif=self.order_tif,
             outside_rth=self.outside_rth,
         )
@@ -514,11 +532,17 @@ class LiveMedianMadMeanReversion(OpenTradesPersistenceMixin):
         self.open_trades.append({
             "trade": trade,
             "qty": signal["qty"],
-            "entry_price": signal["limit_price"],
+            "entry_price": execution_limit,
+            "entry_underlying_price": underlying_ref,
             "entry_date": signal["features"]["date"],
             "entry_time": signal["features"]["time"],
             "entry_reason": signal["reason"],
             "ml_prob": signal.get("ml_prob"),
+            "instrument_type": (
+                self.execution_instrument.instrument_type
+                if self.execution_instrument is not None
+                else "stock"
+            ),
         })
 
         self.trades_today += 1
@@ -526,14 +550,16 @@ class LiveMedianMadMeanReversion(OpenTradesPersistenceMixin):
         self.last_signal = signal
 
         if self.autosave_open_trades:
-            self.save_open_trades()
+            self.open_trades_store.save(self.open_trades)
 
         if self.DEBUG_ORDERS:
             self.log(
                 f"[BUY SENT] {self.symbol} "
                 f"reason={signal['reason']} "
                 f"qty={signal['qty']} "
-                f"limit={signal['limit_price']} "
+                f"limit={execution_limit} "
+                f"underlying_ref={underlying_ref:.2f} "
+                f"instrument={self.open_trades[-1]['instrument_type']} "
                 f"ml_prob={signal.get('ml_prob')} "
                 f"trades_today={self.trades_today} "
                 f"open_trades={len(self.open_trades)}"
@@ -557,8 +583,8 @@ class LiveMedianMadMeanReversion(OpenTradesPersistenceMixin):
         still_open = []
 
         for t in self.open_trades:
-            entry_price = t["entry_price"]
-            take_profit = entry_price * (1 + self.min_take_profit)
+            entry_underlying = t.get("entry_underlying_price", t["entry_price"])
+            take_profit = entry_underlying * (1 + self.min_take_profit)
 
             if close >= take_profit:
                 self.close_trade(t, close, today)
@@ -568,14 +594,21 @@ class LiveMedianMadMeanReversion(OpenTradesPersistenceMixin):
         self.open_trades = still_open
 
         if self.autosave_open_trades:
-            self.save_open_trades()
+            self.open_trades_store.save(self.open_trades)
 
     def close_trade(self, trade_info, close_price, today):
+        if self.execution_instrument is not None:
+            trade_contract = self.execution_instrument.resolve_contract()
+            exit_limit = self.execution_instrument.estimate_exit_limit_price(close_price)
+        else:
+            trade_contract = self.order_router.contract
+            exit_limit = round(close_price, 2)
+
         order_spec = LimitOrderSpec(
-            contract=self.order_router.contract,
+            contract=trade_contract,
             side=OrderSide.SELL,
             qty=trade_info["qty"],
-            limit_price=round(close_price, 2),
+            limit_price=exit_limit,
             tif=self.order_tif,
             outside_rth=self.outside_rth,
         )
@@ -588,7 +621,9 @@ class LiveMedianMadMeanReversion(OpenTradesPersistenceMixin):
         if self.DEBUG_ORDERS:
             self.log(
                 f"[SELL SENT] {self.symbol} qty={trade_info['qty']} "
-                f"limit={round(close_price, 2)} "
+                f"limit={exit_limit} "
+                f"underlying_ref={close_price:.2f} "
+                f"instrument={trade_info.get('instrument_type', 'stock')} "
                 f"last_sell_date={today}"
             )
 
