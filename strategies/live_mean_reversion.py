@@ -58,6 +58,7 @@ class LiveMeanReversion:
         # Strategy config
         # ----------------------------
         self.k = strategy_cfg.get("k", 2)
+        entry_strategy_name = strategy_cfg.get("entry_strategy", {}).get("name")
         self.entry_condition_evaluator = EntryConditionEvaluator.from_config(
             strategy_cfg=strategy_cfg,
             double_down_cfg=double_down_cfg,
@@ -76,6 +77,12 @@ class LiveMeanReversion:
         self.fuckup_take_profit = strategy_cfg.get("fuckup_take_profit", 0.10)
 
         self.RSI_THRESH = strategy_cfg.get("rsi_thresh", 300)
+        default_price_only_entries = entry_strategy_name == "always_true"
+        self.price_only_entries = strategy_cfg.get(
+            "price_only_entries",
+            default_price_only_entries,
+        )
+        self.require_rsi = strategy_cfg.get("require_rsi", not self.price_only_entries)
 
         self.reentry_cooldown_days = strategy_cfg.get("reentry_cooldown_days", 7)
         self.reentry_discount_pct = strategy_cfg.get("reentry_discount_pct", 0.01)
@@ -306,26 +313,34 @@ class LiveMeanReversion:
         if self.open_trades_today >= self.max_open_trades_today:
             reasons.append("max_open_trades_today")
 
-        if features["session_minutes"] < self.no_trade_first_minutes:
+        if (
+            not self.price_only_entries
+            and features["session_minutes"] < self.no_trade_first_minutes
+        ):
             reasons.append("too_early")
 
-        if features["minutes_until_close"] < self.no_new_entries_last_minutes:
+        if (
+            not self.price_only_entries
+            and features["minutes_until_close"] < self.no_new_entries_last_minutes
+        ):
             reasons.append("too_late")
 
-        if features["rsi"] is None or pd.isna(features["rsi"]):
-            reasons.append("rsi_missing")
-        elif features["rsi"] > self.RSI_THRESH:
-            reasons.append("rsi_too_high")
+        if not self.price_only_entries and self.require_rsi:
+            if features["rsi"] is None or pd.isna(features["rsi"]):
+                reasons.append("rsi_missing")
+            elif features["rsi"] > self.RSI_THRESH:
+                reasons.append("rsi_too_high")
 
         # ====================================================
         # CatBoost / model filter
         # Default always passes.
         # ====================================================
 
-        if features.get("ml_prob") is None:
-            reasons.append("ml_prob_missing")
-        elif not features.get("ml_passed", False):
-            reasons.append("ml_prob_too_low")
+        if not self.price_only_entries:
+            if features.get("ml_prob") is None:
+                reasons.append("ml_prob_missing")
+            elif not features.get("ml_passed", False):
+                reasons.append("ml_prob_too_low")
 
         # ====================================================
         # First entry vs double-down logic
@@ -333,9 +348,13 @@ class LiveMeanReversion:
 
         if not self.open_trades:
             entry_type = "first_entry"
-            entry_condition_reasons, entry_condition_debug = (
-                self.entry_condition_evaluator.evaluate(entry_type, features)
-            )
+            if self.price_only_entries:
+                entry_condition_reasons = []
+                entry_condition_debug = []
+            else:
+                entry_condition_reasons, entry_condition_debug = (
+                    self.entry_condition_evaluator.evaluate(entry_type, features)
+                )
             reasons.extend(entry_condition_reasons)
 
         else:
@@ -344,13 +363,19 @@ class LiveMeanReversion:
             if not self.double_down_enabled:
                 reasons.append("double_down_disabled")
 
-            entry_condition_reasons, entry_condition_debug = (
-                self.entry_condition_evaluator.evaluate(entry_type, features)
-            )
+            if self.price_only_entries:
+                entry_condition_reasons = []
+                entry_condition_debug = []
+            else:
+                entry_condition_reasons, entry_condition_debug = (
+                    self.entry_condition_evaluator.evaluate(entry_type, features)
+                )
             reasons.extend(entry_condition_reasons)
 
             if self.double_down_enabled and not entry_condition_reasons:
-                double_down_reasons, double_down_debug = self.check_double_down_price_rules(features)
+                double_down_reasons, double_down_debug = self.check_double_down_price_rules(
+                    features
+                )
                 reasons.extend(double_down_reasons)
             else:
                 double_down_debug = []
@@ -380,7 +405,11 @@ class LiveMeanReversion:
         # Existing logic kept.
         # ====================================================
 
-        if self.last_sell_price is not None and self.last_sell_date is not None:
+        if (
+            not self.price_only_entries
+            and self.last_sell_price is not None
+            and self.last_sell_date is not None
+        ):
             days_since_sell = (today - self.last_sell_date).days
 
             if days_since_sell < self.reentry_cooldown_days:
@@ -414,6 +443,8 @@ class LiveMeanReversion:
                         f"price_rules={price_rule_text} "
                         f"rsi={rsi_text} "
                         f"ml_prob={ml_text} "
+                        f"price_only={self.price_only_entries} "
+                        f"require_rsi={self.require_rsi} "
                         f"reasons={reasons}"
                     )
                 else:
@@ -426,6 +457,8 @@ class LiveMeanReversion:
                         f"latest_trade={self.format_latest_trade_price_debug(latest_trade_debug)} "
                         f"rsi={rsi_text} "
                         f"ml_prob={ml_text} "
+                        f"price_only={self.price_only_entries} "
+                        f"require_rsi={self.require_rsi} "
                         f"reasons={reasons}"
                     )
 

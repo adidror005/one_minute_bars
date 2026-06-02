@@ -120,6 +120,14 @@ DEFAULT_LIVE_CONFIG = {
         "fuckup_take_profit": 0.10,
 
         "rsi_thresh": 300,
+        # If true, entries ignore timing, RSI, model, and reentry-cooldown
+        # guards. First entries are then controlled by entry_price_limits, and
+        # double-down entries by the configured double-down dip rules.
+        "price_only_entries": False,
+        # If false, missing/high RSI will not block entries. Useful with
+        # entry_strategy=always_true when you want price gates to be the only
+        # entry guard.
+        "require_rsi": True,
 
         "reentry_cooldown_days": 7,
         "reentry_discount_pct": 0.01,
