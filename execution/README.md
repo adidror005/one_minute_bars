@@ -27,6 +27,9 @@ execution_instrument = build_execution_instrument(
     execution_cfg=config.execution,
     symbol=config.symbol,
 )
+# build_execution_instrument subscribes the execution instrument to live
+# market data once. Limit estimates reuse that ticker instead of polling
+# snapshots or sleeping.
 
 order_router = IBKRLimitOrderRouter(ib=ib)
 
@@ -44,5 +47,5 @@ algo = LiveMeanReversion(
 ## Behavior
 
 - Entry/exit **decisions** use underlying features (`close`, BB score, RSI, etc.).
-- Entry/exit **orders** use the configured stock or option contract and estimated option limit prices.
+- Entry/exit **orders** use the configured stock or option contract and estimated limit prices from subscribed IBKR market data.
 - Take-profit checks compare underlying close vs `entry_underlying_price`.

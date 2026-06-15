@@ -16,12 +16,10 @@ from .engine import (
 @dataclass
 class IbAsyncOptionMarketDataProvider(OptionMarketDataProvider):
     ib: object
+    _tickers: dict[OptionContractSpec, object] | None = None
 
     def get_option_quote(self, contract: OptionContractSpec) -> OptionQuote:
-        ib_contract = self._to_ib_option(contract)
-        self.ib.qualifyContracts(ib_contract)
-        ticker = self.ib.reqMktData(ib_contract, "", False, False)
-        self.ib.sleep(0.2)
+        ticker = self.subscribe_option_market_data(contract)
 
         bid = _safe_float(getattr(ticker, "bid", None))
         ask = _safe_float(getattr(ticker, "ask", None))
@@ -47,6 +45,30 @@ class IbAsyncOptionMarketDataProvider(OptionMarketDataProvider):
             underlier_price=under,
             timestamp=datetime.now(timezone.utc),
         )
+
+    def subscribe_option_market_data(self, contract: OptionContractSpec):
+        if self._tickers is None:
+            self._tickers = {}
+
+        ticker = self._tickers.get(contract)
+        if ticker is not None:
+            return ticker
+
+        ib_contract = self._to_ib_option(contract)
+        self.ib.qualifyContracts(ib_contract)
+        ticker = self.ib.reqMktData(ib_contract, "", False, False)
+        self._tickers[contract] = ticker
+        return ticker
+
+    def cancel_market_data(self) -> None:
+        if not self._tickers:
+            return
+
+        for ticker in self._tickers.values():
+            contract = getattr(ticker, "contract", None)
+            if contract is not None:
+                self.ib.cancelMktData(contract)
+        self._tickers.clear()
 
     def get_similar_option_quotes(
         self,
@@ -146,14 +168,21 @@ class IbAsyncOptionPricingEngine(DefaultOptionPricingEngine):
         expiry_close_hour: int = 16,
         expiry_close_minute: int = 0,
     ):
+        self.ib_data_provider = IbAsyncOptionMarketDataProvider(ib=ib)
         super().__init__(
-            data_provider=IbAsyncOptionMarketDataProvider(ib=ib),
+            data_provider=self.ib_data_provider,
             risk_free_rate=risk_free_rate,
             risk_free_rate_provider=risk_free_rate_provider,
             expiry_timezone=expiry_timezone,
             expiry_close_hour=expiry_close_hour,
             expiry_close_minute=expiry_close_minute,
         )
+
+    def subscribe_option_market_data(self, contract: OptionContractSpec):
+        return self.ib_data_provider.subscribe_option_market_data(contract)
+
+    def cancel_market_data(self) -> None:
+        self.ib_data_provider.cancel_market_data()
 
 
 def _safe_float(v) -> float | None:
@@ -174,4 +203,3 @@ def _compute_mid(bid: float | None, ask: float | None) -> float | None:
     if bid > ask:
         return None
     return (bid + ask) / 2.0
-

@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from ib_async import Option, Stock
+from ib_async import Option, Stock, IB
 
 from options import IbAsyncOptionPricingEngine, OptionContractSpec
 
@@ -31,6 +31,12 @@ class ExecutionInstrument:
     def resolve_contract(self) -> Any:
         raise NotImplementedError
 
+    def subscribe_market_data(self) -> Any:
+        raise NotImplementedError
+
+    def cancel_market_data(self) -> None:
+        raise NotImplementedError
+
     def estimate_market_price(self) -> float:
         raise NotImplementedError
 
@@ -50,7 +56,7 @@ class IbkrExecutionInstrument(ExecutionInstrument):
 
     def __init__(
         self,
-        ib: object,
+        ib: IB,
         config: ExecutionInstrumentConfig,
         option_engine: IbAsyncOptionPricingEngine | None = None,
     ):
@@ -58,6 +64,7 @@ class IbkrExecutionInstrument(ExecutionInstrument):
         self.config = config
         self.option_engine = option_engine or IbAsyncOptionPricingEngine(ib=ib)
         self._contract: Any | None = None
+        self._ticker: Any | None = None
 
     @property
     def instrument_type(self) -> InstrumentType:
@@ -92,6 +99,26 @@ class IbkrExecutionInstrument(ExecutionInstrument):
 
         raise ValueError(f"Unsupported instrument type: {self.config.type}")
 
+    def subscribe_market_data(self) -> Any:
+        contract = self.resolve_contract()
+
+        if self.config.type == "option":
+            spec = self._option_spec()
+            return self.option_engine.subscribe_option_market_data(spec)
+
+        if self._ticker is None:
+            self._ticker = self.ib.reqMktData(contract, "", False, False)
+
+        return self._ticker
+
+    def cancel_market_data(self) -> None:
+        if self._ticker is not None:
+            self.ib.cancelMktData(self.resolve_contract())
+            self._ticker = None
+
+        if hasattr(self.option_engine, "cancel_market_data"):
+            self.option_engine.cancel_market_data()
+
     def estimate_market_price(self) -> float:
         return self._estimate_market_price()
 
@@ -110,37 +137,37 @@ class IbkrExecutionInstrument(ExecutionInstrument):
             return self._estimate_stock_price()
 
         if self.config.type == "option":
-            spec = OptionContractSpec(
-                symbol=self.config.symbol,
-                expiry=self.config.expiry or "",
-                strike=float(self.config.strike or 0.0),
-                right=(self.config.right or "C").upper(),
-                exchange=self.config.exchange,
-                currency=self.config.currency,
-                multiplier=self.config.multiplier,
-            )
-            return self.option_engine.estimate_option_price(spec).price
+            return self.option_engine.estimate_option_price(self._option_spec()).price
 
         raise ValueError(f"Unsupported instrument type: {self.config.type}")
 
     def _estimate_stock_price(self) -> float:
-        stock = Stock(
-            symbol=self.config.symbol,
-            exchange=self.config.exchange,
-            currency=self.config.currency,
-        )
-        self.ib.qualifyContracts(stock)
-        ticker = self.ib.reqMktData(stock, "", False, False)
-        self.ib.sleep(0.2)
+        ticker = self.subscribe_market_data()
+
         for attr in ("last", "close", "marketPrice"):
-            val = getattr(ticker, attr, None)
-            if val is not None and float(val) > 0:
-                return float(val)
+            val = _ticker_value(ticker, attr)
+            if val is not None and val > 0:
+                return val
+
         bid = getattr(ticker, "bid", None)
         ask = getattr(ticker, "ask", None)
-        if bid is not None and ask is not None and bid <= ask:
-            return (float(bid) + float(ask)) / 2.0
+        bid_val = _safe_float(bid)
+        ask_val = _safe_float(ask)
+        if bid_val is not None and ask_val is not None and bid_val <= ask_val:
+            return (bid_val + ask_val) / 2.0
+
         raise ValueError(f"Could not estimate stock price for {self.config.symbol}")
+
+    def _option_spec(self) -> OptionContractSpec:
+        return OptionContractSpec(
+            symbol=self.config.symbol,
+            expiry=self.config.expiry or "",
+            strike=float(self.config.strike or 0.0),
+            right=(self.config.right or "C").upper(),
+            exchange=self.config.exchange,
+            currency=self.config.currency,
+            multiplier=self.config.multiplier,
+        )
 
     def _build_option_contract(self, spec: OptionContractSpec) -> Option:
         option = Option(
@@ -192,4 +219,25 @@ def build_execution_instrument(
             )
         ),
     )
-    return IbkrExecutionInstrument(ib=ib, config=config, option_engine=option_engine)
+    instrument = IbkrExecutionInstrument(ib=ib, config=config, option_engine=option_engine)
+    instrument.subscribe_market_data()
+    return instrument
+
+
+def _ticker_value(ticker: Any, attr: str) -> float | None:
+    value = getattr(ticker, attr, None)
+    if callable(value):
+        value = value()
+    return _safe_float(value)
+
+
+def _safe_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    if result != result:
+        return None
+    return result
