@@ -1,7 +1,6 @@
 """Trade execution helpers: underlying signal, stock/option orders."""
 
 from .instrument import (
-    ExecutionInstrument,
     ExecutionInstrumentConfig,
     IbkrExecutionInstrument,
     build_execution_instrument,
@@ -20,7 +19,6 @@ from .order_views import (
 )
 
 __all__ = [
-    "ExecutionInstrument",
     "ExecutionInstrumentConfig",
     "IbkrExecutionInstrument",
     "active_orders",
