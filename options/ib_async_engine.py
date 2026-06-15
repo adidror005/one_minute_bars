@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from ib_async import Option
@@ -16,7 +16,7 @@ from .engine import (
 @dataclass
 class IbAsyncOptionMarketDataProvider(OptionMarketDataProvider):
     ib: object
-    _tickers: dict[OptionContractSpec, object] | None = None
+    _tickers: dict[OptionContractSpec, object] = field(default_factory=dict)
 
     def get_option_quote(self, contract: OptionContractSpec) -> OptionQuote:
         ticker = self.subscribe_option_market_data(contract)
@@ -47,23 +47,13 @@ class IbAsyncOptionMarketDataProvider(OptionMarketDataProvider):
         )
 
     def subscribe_option_market_data(self, contract: OptionContractSpec):
-        if self._tickers is None:
-            self._tickers = {}
-
-        ticker = self._tickers.get(contract)
-        if ticker is not None:
-            return ticker
-
-        ib_contract = self._to_ib_option(contract)
-        self.ib.qualifyContracts(ib_contract)
-        ticker = self.ib.reqMktData(ib_contract, "", False, False)
-        self._tickers[contract] = ticker
-        return ticker
+        if contract not in self._tickers:
+            ib_contract = self._to_ib_option(contract)
+            self.ib.qualifyContracts(ib_contract)
+            self._tickers[contract] = self.ib.reqMktData(ib_contract, "", False, False)
+        return self._tickers[contract]
 
     def cancel_market_data(self) -> None:
-        if not self._tickers:
-            return
-
         for ticker in self._tickers.values():
             contract = getattr(ticker, "contract", None)
             if contract is not None:

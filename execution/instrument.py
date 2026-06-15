@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from ib_async import Option, Stock, IB
+from ib_async import IB, Option, Stock
 
 from options import IbAsyncOptionPricingEngine, OptionContractSpec
 
@@ -17,12 +17,10 @@ class ExecutionInstrumentConfig:
     symbol: str = "META"
     exchange: str = "SMART"
     currency: str = "USD"
-    # Single option fields
     expiry: str | None = None
     strike: float | None = None
     right: str | None = None
     multiplier: float = 100.0
-    # Limit offsets applied to estimated execution-instrument price
     limit_entry_offset_pct: float = 0.02
     limit_exit_offset_pct: float = 0.02
 
@@ -52,8 +50,6 @@ class ExecutionInstrument:
 
 
 class IbkrExecutionInstrument(ExecutionInstrument):
-    """Routes orders to stock or a single option while signals stay on underlying."""
-
     def __init__(
         self,
         ib: IB,
@@ -84,30 +80,18 @@ class IbkrExecutionInstrument(ExecutionInstrument):
             return self._contract
 
         if self.config.type == "option":
-            self._contract = self._build_option_contract(
-                OptionContractSpec(
-                    symbol=self.config.symbol,
-                    expiry=self.config.expiry or "",
-                    strike=float(self.config.strike or 0.0),
-                    right=(self.config.right or "C").upper(),
-                    exchange=self.config.exchange,
-                    currency=self.config.currency,
-                    multiplier=self.config.multiplier,
-                )
-            )
+            self._contract = self._build_option_contract(self._option_spec())
             return self._contract
 
         raise ValueError(f"Unsupported instrument type: {self.config.type}")
 
     def subscribe_market_data(self) -> Any:
-        contract = self.resolve_contract()
-
         if self.config.type == "option":
-            spec = self._option_spec()
-            return self.option_engine.subscribe_option_market_data(spec)
+            self.resolve_contract()
+            return self.option_engine.subscribe_option_market_data(self._option_spec())
 
         if self._ticker is None:
-            self._ticker = self.ib.reqMktData(contract, "", False, False)
+            self._ticker = self.ib.reqMktData(self.resolve_contract(), "", False, False)
 
         return self._ticker
 
@@ -120,26 +104,20 @@ class IbkrExecutionInstrument(ExecutionInstrument):
             self.option_engine.cancel_market_data()
 
     def estimate_market_price(self) -> float:
-        return self._estimate_market_price()
-
-    def estimate_entry_limit_price(self, underlying_reference_price: float) -> float:
-        base = self._estimate_market_price()
-        offset = self.config.limit_entry_offset_pct
-        return round(max(0.01, base * (1.0 - offset)), 2)
-
-    def estimate_exit_limit_price(self, underlying_reference_price: float) -> float:
-        base = self._estimate_market_price()
-        offset = self.config.limit_exit_offset_pct
-        return round(max(0.01, base * (1.0 - offset)), 2)
-
-    def _estimate_market_price(self) -> float:
         if self.config.type == "stock":
             return self._estimate_stock_price()
-
         if self.config.type == "option":
             return self.option_engine.estimate_option_price(self._option_spec()).price
-
         raise ValueError(f"Unsupported instrument type: {self.config.type}")
+
+    def estimate_entry_limit_price(self, underlying_reference_price: float) -> float:
+        return self._limit_price(self.config.limit_entry_offset_pct)
+
+    def estimate_exit_limit_price(self, underlying_reference_price: float) -> float:
+        return self._limit_price(self.config.limit_exit_offset_pct)
+
+    def _limit_price(self, offset: float) -> float:
+        return round(max(0.01, self.estimate_market_price() * (1.0 - offset)), 2)
 
     def _estimate_stock_price(self) -> float:
         ticker = self.subscribe_market_data()
@@ -149,10 +127,8 @@ class IbkrExecutionInstrument(ExecutionInstrument):
             if val is not None and val > 0:
                 return val
 
-        bid = getattr(ticker, "bid", None)
-        ask = getattr(ticker, "ask", None)
-        bid_val = _safe_float(bid)
-        ask_val = _safe_float(ask)
+        bid_val = _safe_float(getattr(ticker, "bid", None))
+        ask_val = _safe_float(getattr(ticker, "ask", None))
         if bid_val is not None and ask_val is not None and bid_val <= ask_val:
             return (bid_val + ask_val) / 2.0
 
